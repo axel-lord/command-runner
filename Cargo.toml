@@ -1,0 +1,42 @@
+[package]
+name = "win-command-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.39", features = ["derive"] }
+color-eyre = "0.6.5"
+env_logger = "0.11.8"
+iced = { version = "0.13.1", features = ["tokio"] }
+log = { version = "0.4.27", features = ["max_level_debug", "release_max_level_info"]  }
+rfd = { version = "0.15.3", default-features = false, features = ["xdg-portal", "tokio"] }
+serde = { version = "1.0.219", features = ["derive"] }
+shell-words = "1.1.0"
+tokio = { version = "1.45.1", features = ["process", "rt", "fs"] }
+toml = "0.8.22"
+
+[profile.release]
+strip = "debuginfo"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[lints.rust]
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+allow_attributes = "warn"
+missing_docs_in_private_items = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+missing_safety_doc = "warn"
+future_not_send = "warn"
+missing_const_for_fn = "warn"
