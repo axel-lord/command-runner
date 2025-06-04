@@ -5,7 +5,7 @@ build-exe:
 	cargo build --target x86_64-pc-windows-gnu --release
 
 exe: build-exe
-	cp ./target/x86_64-pc-windows-gnu/release/win-command-runner.exe ./
+	cp ./target/x86_64-pc-windows-gnu/release/command-runner.exe ./
 
 # Run all tests with all features.
 test-all:
