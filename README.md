@@ -1,2 +1,2 @@
-# Win Command Runner
+# Command Runner
 Application to run commands on windows environments
