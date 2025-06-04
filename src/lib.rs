@@ -1,12 +1,8 @@
 #![doc = include_str!("../README.md")]
 
-use ::std::{
-    convert::identity,
-    path::{Path, PathBuf},
-    process::ExitStatus,
-};
+use ::std::{convert::identity, path::PathBuf};
 
-use ::clap::{Args, Parser, ValueEnum, ValueHint};
+use ::clap::{Parser, ValueEnum};
 use ::color_eyre::Report;
 use ::iced::{
     Alignment::Center,
@@ -17,14 +13,12 @@ use ::iced::{
     widget::{self, Column, Row, button, text, text_editor, text_input},
 };
 use ::rfd::AsyncFileDialog;
-use ::serde::{Deserialize, Serialize};
 
-/// Format a status message
-macro_rules! status {
-    ($($arg:tt)*) => {
-        $crate::Message::SetStatus(format!($($arg)*))
-    };
-}
+use crate::{config::Config, state::State};
+
+pub mod config;
+
+pub mod state;
 
 /// Application inted for use to run other applications in a wine envirnoment.
 #[derive(Debug, Parser)]
@@ -57,136 +51,6 @@ pub struct Cli {
     state: State,
 }
 
-/// Reloadable application state.
-#[derive(Debug, Default)]
-pub struct State {
-    /// Executable.
-    exe: String,
-    /// Arguments.
-    args: widget::text_editor::Content,
-    /// Status line.
-    status: String,
-}
-
-impl State {
-    /// Convert current state to a config.
-    fn to_config(&self) -> Result<Config, Message> {
-        let arg = ::shell_words::split(&self.args.text()).map_err(|err| {
-            ::log::error!("could not parse arguments\n{err}");
-            status!("could not parse arguments")
-        })?;
-        let exe = self.exe.clone();
-
-        Ok(Config { exe, arg })
-    }
-}
-
-/// Application config.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Args)]
-#[serde(default)]
-pub struct Config {
-    /// Executable path.
-    #[arg(long, short, default_value_t, value_hint = ValueHint::FilePath)]
-    #[serde(skip_serializing_if = "String::is_empty")]
-    exe: String,
-    /// Application arguments.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    arg: Vec<String>,
-}
-
-impl Config {
-    /// Save config.
-    async fn save_inner(&self, path: &Path) -> Result<(), String> {
-        let content = ::toml::to_string_pretty(self).map_err(|err| {
-            ::log::error!("could not serialize config\n{err}");
-            "could not serialize config".to_owned()
-        })?;
-
-        ::tokio::fs::write(path, content).await.map_err(|err| {
-            ::log::error!("could not write config to {path:?}\n{err}");
-            format!("could not write {path:?}")
-        })?;
-        Ok(())
-    }
-
-    /// Save config.
-    async fn save(self, path: PathBuf) -> Task<Message> {
-        match self.save_inner(&path).await {
-            Ok(()) => Task::done(Message::SetStatus(format!("saved to '{path:?}'"))),
-            Err(msg) => Task::done(Message::SetStatus(msg)),
-        }
-    }
-
-    /// Load config.
-    async fn load_inner(path: &Path) -> Result<Self, String> {
-        let content = ::tokio::fs::read_to_string(&path).await.map_err(|err| {
-            ::log::error!("could not read {path:?} to string\n{err}'");
-            format!("could not parse '{path:?}'")
-        })?;
-
-        let config = ::toml::from_str(&content).map_err(|err| {
-            ::log::error!("could not parse '{path:?}' as toml\n{err}");
-            format!("could not parse '{path:?}'")
-        })?;
-
-        Ok(config)
-    }
-
-    /// Load config.
-    async fn load(path: PathBuf) -> Task<Message> {
-        match Self::load_inner(&path).await {
-            Ok(config) => Task::batch(
-                [
-                    Message::UpdateConfig(Box::new(config)),
-                    Message::SetStatus(format!("loaded config {path:?}")),
-                ]
-                .map(Task::done),
-            ),
-            Err(err_msg) => {
-                Task::batch([Message::SetStatus(err_msg), Message::Reload].map(Task::done))
-            }
-        }
-    }
-
-    /// Load config dialog.
-    async fn load_dialog() -> Message {
-        match AsyncFileDialog::new()
-            .set_title("Open Config")
-            .add_filter("TOML", &["toml"])
-            .pick_file()
-            .await
-        {
-            Some(handle) => Message::SetConfigPath(handle.path().to_path_buf()),
-            None => Message::SetStatus("no config selected".into()),
-        }
-    }
-
-    /// Save config dialog.
-    async fn save_dialog(self) -> Task<Message> {
-        match AsyncFileDialog::new()
-            .set_title("Save Config")
-            .add_filter("TOML", &["toml"])
-            .save_file()
-            .await
-        {
-            Some(handle) => self.save(handle.path().to_path_buf()).await,
-            None => Task::done(Message::SetStatus("no file to write to selected".into())),
-        }
-    }
-
-    /// Run this config in an async context.
-    async fn run_async(self) -> std::io::Result<ExitStatus> {
-        let Self { exe, arg } = self;
-        ::tokio::process::Command::new(exe).args(arg).status().await
-    }
-
-    /// Run config.
-    fn run(self) -> std::io::Result<ExitStatus> {
-        let Self { exe, arg } = self;
-        ::std::process::Command::new(exe).args(arg).status()
-    }
-}
-
 /// Application theme.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum Theme {
@@ -217,16 +81,16 @@ pub enum Message {
     EditArgs(widget::text_editor::Action),
     /// Set status line.
     SetStatus(String),
-    /// Set config path.
-    SetConfigPath(PathBuf),
     /// Update config.
-    UpdateConfig(Box<Config>),
+    UpdateConfig(Box<(Config, PathBuf)>),
     /// Load config file.
-    LoadConfig,
+    LoadConfig(PathBuf),
+    /// Save config.
+    SaveConfig(Box<(Config, PathBuf)>),
     /// Open executable dialog.
-    OpenExeDialog,
+    ExeDialog,
     /// Open config dialog.
-    OpenConfigDialog,
+    LoadConfigDialog,
     /// Save config dialog.
     SaveConfigDialog,
     /// Run executable.
@@ -237,12 +101,18 @@ pub enum Message {
     Reload,
 }
 
+impl From<String> for Message {
+    fn from(value: String) -> Self {
+        Self::SetStatus(value)
+    }
+}
+
 impl Cli {
     /// Run Application.
     ///
     /// # Errors
     /// On fatal application errors.
-    pub fn run(self) -> ::color_eyre::Result<()> {
+    pub fn run(mut self) -> ::color_eyre::Result<()> {
         if self.skip {
             let config =
                 ::std::fs::read_to_string(self.config_path.unwrap_or_else(|| unreachable!()))?;
@@ -256,8 +126,8 @@ impl Cli {
                 .centered()
                 .executor::<::tokio::runtime::Runtime>()
                 .run_with(|| {
-                    let task = if self.config_path.is_some() {
-                        Message::LoadConfig
+                    let task = if let Some(path) = self.config_path.take() {
+                        Message::LoadConfig(path)
                     } else {
                         Message::Reload
                     };
@@ -272,32 +142,28 @@ impl Cli {
         match message {
             Message::SetTheme(theme) => {
                 self.theme = theme;
-                Task::done(Message::SetStatus(format!(
-                    "set theme to {theme}",
-                    theme = ::iced::Theme::from(theme)
-                )))
+                Task::done(
+                    format!("set theme to {theme}", theme = ::iced::Theme::from(theme)).into(),
+                )
             }
             Message::SetExe(exe) => {
                 self.state.exe = exe;
-                Task::done(Message::SetStatus(format!(
-                    "selected {exe}",
-                    exe = self.state.exe
-                )))
+                Task::done(format!("selected {exe}", exe = self.state.exe).into())
             }
             Message::Run => {
                 let config = match self.state.to_config() {
                     Ok(config) => config,
-                    Err(err) => return Task::done(err),
+                    Err(err) => return Task::done(err.into()),
                 };
                 Task::future(config.run_async()).then(|result| match result {
-                    Ok(status) => Task::done(status!("process finished with {status}")),
+                    Ok(status) => Task::done(format!("process finished with {status}").into()),
                     Err(msg) => {
                         ::log::error!("failed to run process\n{msg}");
-                        Task::done(status!("{msg}"))
+                        Task::done(msg.to_string().into())
                     }
                 })
             }
-            Message::OpenExeDialog => Task::future(
+            Message::ExeDialog => Task::future(
                 AsyncFileDialog::new()
                     .set_file_name(&self.state.exe)
                     .set_title("Select Executable")
@@ -336,15 +202,8 @@ impl Cli {
 
                 Task::none()
             }
-            Message::LoadConfig => {
-                let Some(path) = self.config_path.clone() else {
-                    return Task::none();
-                };
-
-                Task::future(Config::load(path)).then(identity)
-            }
             Message::UpdateConfig(config) => {
-                let Config { exe, arg } = *config;
+                let (Config { exe, arg }, path_buf) = *config;
 
                 if !exe.is_empty() {
                     self.config.exe = exe;
@@ -354,19 +213,56 @@ impl Cli {
                     self.config.arg = arg;
                 }
 
-                Task::done(Message::Reload)
+                Task::batch(
+                    [
+                        format!("loaded config {path_buf:?}").into(),
+                        Message::Reload,
+                    ]
+                    .map(Task::done),
+                )
             }
-            Message::OpenConfigDialog => Task::future(Config::load_dialog()),
-            Message::SetConfigPath(path_buf) => {
-                self.config_path = Some(path_buf);
-                Task::done(Message::LoadConfig)
+            Message::LoadConfig(path_buf) => {
+                Task::future(Config::load(path_buf)).then(|result| match result {
+                    Ok(config) => Task::done(Message::UpdateConfig(Box::new(config))),
+                    Err(err) => {
+                        ::log::error!("{err}");
+                        Task::done(err.into())
+                    }
+                })
+            }
+            Message::SaveConfig(config) => {
+                let (config, path_buf) = *config;
+                Task::future(config.save(path_buf)).then(|result| match result {
+                    Ok(path_buf) => Task::done(format!("saved config to {path_buf:?}").into()),
+                    Err(err) => {
+                        ::log::error!("{err}");
+                        Task::done(err.into())
+                    }
+                })
+            }
+            Message::LoadConfigDialog => {
+                Task::future(Config::load_dialog()).then(|result| match result {
+                    Ok(path_buf) => Task::done(Message::LoadConfig(path_buf)),
+                    Err(err) => {
+                        ::log::error!("{err}");
+                        Task::done(err.into())
+                    }
+                })
             }
             Message::SaveConfigDialog => {
                 let config = match self.state.to_config() {
                     Ok(config) => config,
-                    Err(err) => return Task::done(err),
+                    Err(err) => return Task::done(err.into()),
                 };
-                Task::future(Config::save_dialog(config)).then(identity)
+
+                Task::future(async { (config, Config::save_dialog().await) }).then(
+                    |(config, result)| match result {
+                        Ok(path_buf) => {
+                            Task::done(Message::SaveConfig(Box::new((config, path_buf))))
+                        }
+                        Err(err) => Task::done(err.into()),
+                    },
+                )
             }
         }
     }
@@ -384,7 +280,7 @@ impl Cli {
                     .align_y(Center)
                     .spacing(3)
                     .push(text_input("Executable...", &self.state.exe).on_input(Message::SetExe))
-                    .push(button("Open").on_press_with(|| Message::OpenExeDialog)),
+                    .push(button("Open").on_press_with(|| Message::ExeDialog)),
             )
             .push(
                 text_editor(&self.state.args)
@@ -398,7 +294,7 @@ impl Cli {
                     .align_y(Center)
                     .push(text(&self.state.status).width(Fill))
                     .push(button("Save").on_press_with(|| Message::SaveConfigDialog))
-                    .push(button("Load").on_press_with(|| Message::OpenConfigDialog))
+                    .push(button("Load").on_press_with(|| Message::LoadConfigDialog))
                     .push(button("Reload").on_press_with(|| Message::Reload))
                     .push(button("Cancel").on_press_with(|| Message::Exit))
                     .push(button("Run").on_press_with(|| Message::Run)),
